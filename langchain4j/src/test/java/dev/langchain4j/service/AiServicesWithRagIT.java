@@ -1,5 +1,24 @@
 package dev.langchain4j.service;
 
+import static dev.langchain4j.data.document.Metadata.metadata;
+import static dev.langchain4j.data.document.loader.FileSystemDocumentLoader.loadDocument;
+import static dev.langchain4j.model.openai.OpenAiChatModelName.GPT_3_5_TURBO;
+import static dev.langchain4j.model.openai.OpenAiChatModelName.GPT_4_O_MINI;
+import static dev.langchain4j.rag.query.router.LanguageModelQueryRouter.FallbackStrategy.FAIL;
+import static dev.langchain4j.rag.query.router.LanguageModelQueryRouter.FallbackStrategy.ROUTE_TO_ALL;
+import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
+import static java.util.Arrays.asList;
+import static java.util.Collections.emptyList;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
 import dev.langchain4j.data.document.Document;
 import dev.langchain4j.data.document.DocumentSplitter;
 import dev.langchain4j.data.document.parser.TextDocumentParser;
@@ -8,11 +27,12 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.TokenCountEstimator;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.embedding.onnx.allminilml6v2q.AllMiniLmL6V2QuantizedEmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
-import dev.langchain4j.model.openai.OpenAiTokenizer;
+import dev.langchain4j.model.openai.OpenAiTokenCountEstimator;
 import dev.langchain4j.model.output.Response;
 import dev.langchain4j.model.scoring.ScoringModel;
 import dev.langchain4j.rag.DefaultRetrievalAugmentor;
@@ -32,13 +52,6 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.EmbeddingStoreIngestor;
 import dev.langchain4j.store.embedding.filter.Filter;
 import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-
 import java.net.URISyntaxException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -46,25 +59,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Stream;
-
-import static dev.langchain4j.data.document.Metadata.metadata;
-import static dev.langchain4j.data.document.loader.FileSystemDocumentLoader.loadDocument;
-import static dev.langchain4j.model.openai.OpenAiChatModelName.GPT_3_5_TURBO;
-import static dev.langchain4j.model.openai.OpenAiChatModelName.GPT_4_O_MINI;
-import static dev.langchain4j.rag.query.router.LanguageModelQueryRouter.FallbackStrategy.FAIL;
-import static dev.langchain4j.rag.query.router.LanguageModelQueryRouter.FallbackStrategy.ROUTE_TO_ALL;
-import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
-import static java.util.Arrays.asList;
-import static java.util.Collections.emptyList;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 @EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
 class AiServicesWithRagIT {
@@ -87,7 +87,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_content_retriever(ChatLanguageModel model) {
+    void should_use_content_retriever(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = EmbeddingStoreContentRetriever.builder()
@@ -97,7 +97,7 @@ class AiServicesWithRagIT {
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .build();
 
@@ -110,7 +110,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_content_retriever_and_chat_memory(ChatLanguageModel model) {
+    void should_use_content_retriever_and_chat_memory(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = spy(EmbeddingStoreContentRetriever.builder()
@@ -126,7 +126,7 @@ class AiServicesWithRagIT {
         chatMemory.add(aiMessage);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .chatMemory(chatMemory)
                 .build();
@@ -139,14 +139,9 @@ class AiServicesWithRagIT {
         // then
         assertThat(answer).containsAnyOf(ALLOWED_CANCELLATION_PERIOD_DAYS, MIN_BOOKING_PERIOD_DAYS);
 
-        verify(contentRetriever).retrieve(Query.from(
-                query,
-                Metadata.from(
-                        UserMessage.from(query),
-                        "default",
-                        asList(userMessage, aiMessage)
-                )
-        ));
+        verify(contentRetriever)
+                .retrieve(Query.from(
+                        query, Metadata.from(UserMessage.from(query), "default", asList(userMessage, aiMessage))));
         verifyNoMoreInteractions(contentRetriever);
     }
 
@@ -157,7 +152,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_content_retriever_and_chat_memory_provider(ChatLanguageModel model) {
+    void should_use_content_retriever_and_chat_memory_provider(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = spy(EmbeddingStoreContentRetriever.builder()
@@ -167,7 +162,7 @@ class AiServicesWithRagIT {
                 .build());
 
         MultiUserAssistant assistant = AiServices.builder(MultiUserAssistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .chatMemoryProvider(memoryId -> MessageWindowChatMemory.withMaxMessages(10))
                 .build();
@@ -182,16 +177,14 @@ class AiServicesWithRagIT {
         // then
         assertThat(answer).containsAnyOf(ALLOWED_CANCELLATION_PERIOD_DAYS, MIN_BOOKING_PERIOD_DAYS);
 
-        verify(contentRetriever).retrieve(Query.from(
-                query,
-                Metadata.from(UserMessage.from(query), memoryId, emptyList()))
-        );
+        verify(contentRetriever)
+                .retrieve(Query.from(query, Metadata.from(UserMessage.from(query), memoryId, emptyList())));
         verifyNoMoreInteractions(contentRetriever);
     }
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_query_transformer_and_content_retriever(ChatLanguageModel model) {
+    void should_use_query_transformer_and_content_retriever(ChatModel model) {
 
         // given
         QueryTransformer queryTransformer = new ExpandingQueryTransformer(model);
@@ -203,7 +196,7 @@ class AiServicesWithRagIT {
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryTransformer(queryTransformer)
                         .contentRetriever(contentRetriever)
@@ -219,7 +212,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_query_router_and_content_retriever(ChatLanguageModel model) {
+    void should_use_query_router_and_content_retriever(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = EmbeddingStoreContentRetriever.builder()
@@ -239,7 +232,7 @@ class AiServicesWithRagIT {
         QueryRouter queryRouter = new LanguageModelQueryRouter(model, retrieverToDescription);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryRouter(queryRouter)
                         .build())
@@ -255,7 +248,7 @@ class AiServicesWithRagIT {
     @Disabled("TODO fix")
     @ParameterizedTest
     @MethodSource("models")
-    void should_not_route_when_query_is_ambiguous(ChatLanguageModel model) {
+    void should_not_route_when_query_is_ambiguous(ChatModel model) {
 
         // given
         String query = "Hey what's up?";
@@ -267,7 +260,7 @@ class AiServicesWithRagIT {
         QueryRouter queryRouter = new LanguageModelQueryRouter(model, retrieverToDescription);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryRouter(queryRouter)
                         .build())
@@ -284,7 +277,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_route_to_all_retrievers_when_query_is_ambiguous(ChatLanguageModel model) {
+    void should_route_to_all_retrievers_when_query_is_ambiguous(ChatModel model) {
 
         // given
         String query = "Hey what's up?";
@@ -300,13 +293,13 @@ class AiServicesWithRagIT {
         retrieverToDescription.put(contentRetriever, "car rental company terms of use");
 
         QueryRouter queryRouter = LanguageModelQueryRouter.builder()
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrieverToDescription(retrieverToDescription)
                 .fallbackStrategy(fallbackStrategy)
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryRouter(queryRouter)
                         .build())
@@ -325,7 +318,7 @@ class AiServicesWithRagIT {
     @Disabled("Fixed in https://github.com/langchain4j/langchain4j/pull/2311")
     @ParameterizedTest
     @MethodSource("models")
-    void should_fail_when_query_is_ambiguous(ChatLanguageModel model) {
+    void should_fail_when_query_is_ambiguous(ChatModel model) {
 
         // given
         String query = "Hey what's up?";
@@ -341,28 +334,27 @@ class AiServicesWithRagIT {
         retrieverToDescription.put(contentRetriever, "car rental company terms of use");
 
         QueryRouter queryRouter = LanguageModelQueryRouter.builder()
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrieverToDescription(retrieverToDescription)
                 .fallbackStrategy(fallbackStrategy)
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryRouter(queryRouter)
                         .build())
                 .build();
 
         // when-then
-        assertThatThrownBy(() -> assistant.answer(query))
-                .hasRootCauseExactlyInstanceOf(NumberFormatException.class);
+        assertThatThrownBy(() -> assistant.answer(query)).hasRootCauseExactlyInstanceOf(NumberFormatException.class);
 
         verifyNoInteractions(contentRetriever);
     }
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_content_retriever_and_content_aggregator(ChatLanguageModel model) {
+    void should_use_content_retriever_and_content_aggregator(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = EmbeddingStoreContentRetriever.builder()
@@ -376,7 +368,7 @@ class AiServicesWithRagIT {
         ContentAggregator contentAggregator = new ReRankingContentAggregator(scoringModel);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .contentRetriever(contentRetriever)
                         .contentAggregator(contentAggregator)
@@ -392,7 +384,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_all_rag_components(ChatLanguageModel model) {
+    void should_use_all_rag_components(ChatModel model) {
 
         // given
         QueryTransformer queryTransformer = new ExpandingQueryTransformer(model);
@@ -414,11 +406,12 @@ class AiServicesWithRagIT {
         when(scoringModel.scoreAll(any(), any())).thenReturn(Response.from(asList(0.9, 0.7)));
         ContentAggregator contentAggregator = ReRankingContentAggregator.builder()
                 .scoringModel(scoringModel)
-                .querySelector((queryToContents) -> queryToContents.keySet().iterator().next())
+                .querySelector(
+                        (queryToContents) -> queryToContents.keySet().iterator().next())
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .retrievalAugmentor(DefaultRetrievalAugmentor.builder()
                         .queryTransformer(queryTransformer)
                         .queryRouter(queryRouter)
@@ -440,14 +433,14 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_dynamicFilter_by_user_id(ChatLanguageModel model) {
+    void should_use_dynamicFilter_by_user_id(ChatModel model) {
 
         // given
         TextSegment user1Info = TextSegment.from("My favorite color is green", metadata("userId", "1"));
         TextSegment user2Info = TextSegment.from("My favorite color is red", metadata("userId", "2"));
 
-        Function<Query, Filter> dynamicMetadataFilter =
-                (query) -> metadataKey("userId").isEqualTo(query.metadata().chatMemoryId().toString());
+        Function<Query, Filter> dynamicMetadataFilter = (query) ->
+                metadataKey("userId").isEqualTo(query.metadata().chatMemoryId().toString());
 
         EmbeddingStore<TextSegment> embeddingStore = new InMemoryEmbeddingStore<>();
         embeddingStore.add(embeddingModel.embed(user1Info).content(), user1Info);
@@ -460,7 +453,7 @@ class AiServicesWithRagIT {
                 .build();
 
         PersonalizedAssistant personalizedAssistant = AiServices.builder(PersonalizedAssistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .chatMemoryProvider(memoryId -> MessageWindowChatMemory.withMaxMessages(10))
                 .build();
@@ -480,7 +473,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_static_metadata_filter(ChatLanguageModel model) {
+    void should_use_static_metadata_filter(ChatModel model) {
 
         // given
         TextSegment catsArticle = TextSegment.from("cats", metadata("animal", "cat"));
@@ -499,7 +492,7 @@ class AiServicesWithRagIT {
                 .build();
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .build();
 
@@ -517,7 +510,7 @@ class AiServicesWithRagIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_use_content_retriever_and_return_sources_inside_result(ChatLanguageModel model) {
+    void should_use_content_retriever_and_return_sources_inside_result(ChatModel model) {
 
         // given
         ContentRetriever contentRetriever = EmbeddingStoreContentRetriever.builder()
@@ -527,7 +520,7 @@ class AiServicesWithRagIT {
                 .build();
 
         AssistantReturningResult assistant = AiServices.builder(AssistantReturningResult.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .contentRetriever(contentRetriever)
                 .build();
 
@@ -541,18 +534,19 @@ class AiServicesWithRagIT {
 
         assertThat(result.sources()).hasSize(1);
         Content content = result.sources().get(0);
-        assertThat(content.textSegment().text()).isEqualToIgnoringWhitespace(
-                "4. Cancellation Policy" +
-                        "4.1 Reservations can be cancelled up to 61 days prior to the start of the booking period." +
-                        "4.2 If the booking period is less than 17 days, cancellations are not permitted."
-        );
+        assertThat(content.textSegment().text())
+                .isEqualToIgnoringWhitespace("4. Cancellation Policy"
+                        + "4.1 Reservations can be cancelled up to 61 days prior to the start of the booking period."
+                        + "4.2 If the booking period is less than 17 days, cancellations are not permitted.");
         assertThat(content.textSegment().metadata().getString("index")).isEqualTo("3");
-        assertThat(content.textSegment().metadata().getString("file_name")).isEqualTo("miles-of-smiles-terms-of-use.txt");
+        assertThat(content.textSegment().metadata().getString("file_name"))
+                .isEqualTo("miles-of-smiles-terms-of-use.txt");
     }
 
-    private void ingest(String documentPath, EmbeddingStore<TextSegment> embeddingStore, EmbeddingModel embeddingModel) {
-        OpenAiTokenizer tokenizer = new OpenAiTokenizer(GPT_3_5_TURBO);
-        DocumentSplitter splitter = DocumentSplitters.recursive(100, 0, tokenizer);
+    private void ingest(
+            String documentPath, EmbeddingStore<TextSegment> embeddingStore, EmbeddingModel embeddingModel) {
+        TokenCountEstimator tokenCountEstimator = new OpenAiTokenCountEstimator(GPT_3_5_TURBO);
+        DocumentSplitter splitter = DocumentSplitters.recursive(100, 0, tokenCountEstimator);
         EmbeddingStoreIngestor ingestor = EmbeddingStoreIngestor.builder()
                 .documentSplitter(splitter)
                 .embeddingModel(embeddingModel)
@@ -565,18 +559,16 @@ class AiServicesWithRagIT {
 
     static Stream<Arguments> models() {
         return Stream.of(
-                Arguments.of(
-                        OpenAiChatModel.builder()
-                                .baseUrl(System.getenv("OPENAI_BASE_URL"))
-                                .apiKey(System.getenv("OPENAI_API_KEY"))
-                                .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
-                                .modelName(GPT_4_O_MINI)
-                                .logRequests(true)
-                                .logResponses(true)
-                                .build()
-                )
+                Arguments.of(OpenAiChatModel.builder()
+                        .baseUrl(System.getenv("OPENAI_BASE_URL"))
+                        .apiKey(System.getenv("OPENAI_API_KEY"))
+                        .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
+                        .modelName(GPT_4_O_MINI)
+                        .logRequests(true)
+                        .logResponses(true)
+                        .build())
                 // TODO add more models
-        );
+                );
     }
 
     private Path toPath(String fileName) {
